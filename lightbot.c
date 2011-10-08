@@ -17,16 +17,11 @@
 
 #define BUFFER_SIZE 4096
 #define HEADER_PING           "PING :"
-#define HEADER_PING_SIZE      6
 #define HEADER_PONG           "PONG :"
 #define HEADER_PRIVMSG        "PRIVMSG"
-#define HEADER_PRIVMSG_SIZE   7
 #define HEADER_JOIN           "JOIN"
-#define HEADER_JOIN_SIZE      4
 #define HEADER_PART           "PART"
-#define HEADER_PART_SIZE      4
 #define HEADER_KICK           "KICK"
-#define HEADER_KICK_SIZE      4
 
 #define NICK_MAX 50
 #define CHANNEL_MAX 50
@@ -45,7 +40,14 @@ typedef enum
 { RETURN_OK = 0, RETURN_FAIL, RETURN_NOTHING
 } eRETURN;
 
-typedef void cmd_func( const char*, const char* );
+typedef struct
+{
+   char nick[ NICK_MAX ];
+   char ident[ NICK_MAX ];
+   char channel[ CHANNEL_MAX ];
+} user_info;
+
+typedef void cmd_func( const user_info*, const char* );
 typedef struct
 {
    const char *command;
@@ -53,16 +55,18 @@ typedef struct
    const char *help;
 } command_t;
 
+typedef void join_func( const user_info* );
 typedef struct
 {
    const char *nick;
+   const char *ident;
    const char *priv;
-   cmd_func   *joinfunc;
-   cmd_func   *partfunc;
+   join_func   *joinfunc;
+   join_func   *partfunc;
 } user_t;
 
 /* split funcs */
-static int strsplit(char ***dst, char *str, char *token);
+static int strsplit(char ***dst, const char *str, const char *token);
 static void strsplit_clear(char ***dst);
 
 /* replace func (check for NULL, and remember free if !NULL) */
@@ -70,13 +74,16 @@ static char *str_replace(const char *s, const char *old, const char *new);
 
 /* helper functions */
 static void say( const char *message, const char *target );
-static void say_highlight( const char *message, const char *nick, const char *target );
-static void set_mode( const char *channel, const char *nick, const char *level );
+static void say_highlight( const char *message, const user_info *user );
+static void set_mode( const user_info *user, const char *level );
+static void set_mode_channel( const char *channel, const char *level );
+static void set_mode_nick( const char *nick, const char *channel, const char *level );
 static size_t sh_run( const char *cmd, char output[][SH_READ_MAX], size_t lines );
 
 /* cmds */
-static void cmd_test( const char *nick, const char *message );
-static void cmd_help( const char *nick, const char *message );
+static void cmd_test( const user_info *user, const char *message );
+static void cmd_op( const user_info *user, const char *message );
+static void cmd_help( const user_info *user, const char *message );
 
 /* define cmds */
 static const command_t MSG_CMD[] =
@@ -84,6 +91,7 @@ static const command_t MSG_CMD[] =
    /* COMMAND, FUNCTION, DESCRIPTION */
    { "!help", cmd_help,    "Show help" },
    { "!test", cmd_test,    "Test command" },
+   { "!op",   cmd_op,      "Give ops" },
 };
 
 /* define users */
@@ -93,35 +101,50 @@ static const user_t IRC_USR[] =
    { "Admin", "+o",      NULL, NULL },
 };
 
-static void cmd_help( const char *nick, const char *message )
+static void cmd_help( const user_info *user, const char *message )
 {
    size_t i;
    char buffer[256];
 
    i = 0;
-   say( "Commands:", nick );
+   say( "Commands:", user->nick );
    for(; i != LENGTH( MSG_CMD ); ++i)
    {
       snprintf(buffer, 256, "%s - %s", MSG_CMD[i].command, MSG_CMD[i].help);
-      say( buffer, nick );
+      say( buffer, user->nick );
    }
 }
 
-static void cmd_test( const char *nick, const char *message )
+static void cmd_op( const user_info *user, const char *message )
 {
-   say_highlight( "Hello World!", nick, BOT_CHANNEL );
+   char **split = NULL;
+   int count = 0, i;
+
+   if(!strlen(message)) { set_mode( user, "+o" ); return; }
+
+   count = strsplit(&split,message," ");
+   i = 0;
+   for(; i != count; ++i)
+      set_mode_nick( split[i], user->channel, "+o" );
+   strsplit_clear(&split);
+}
+
+
+static void cmd_test( const user_info *user, const char *message )
+{
+   say_highlight( "Hello World!", user );
 }
 
 /* JOIN SIGNAL */
-static void JOIN( const char *nick, const char *channel )
+static void JOIN( const user_info *user )
 {
-   say_highlight( "Welcome!", nick, BOT_CHANNEL );
+   say_highlight( "Welcome!", user );
 }
 
 /* PART SIGNAL */
-static void PART( const char *nick, const char *channel )
+static void PART( const user_info *user )
 {
-   say_highlight( "Goodbye!", nick, BOT_CHANNEL );
+   say_highlight( "Goodbye!", user );
 }
 
 /* HELPER FUNCTIONS */
@@ -140,12 +163,12 @@ static void say( const char *message, const char *target )
    { SAY_COUNT = 0; usleep( 500 * 1000 ); /* lol flood avoid, should be replaced with queue */ }
 }
 
-static void say_highlight( const char *message, const char *nick, const char *target )
+static void say_highlight( const char *message, const user_info *user )
 {
    char buffer[ MESSAGE_MAX ];
 
-   snprintf( buffer, MESSAGE_MAX, "%s: %s", nick, message );
-   say( buffer, target );
+   snprintf( buffer, MESSAGE_MAX, "%s: %s", user->nick, message );
+   say( buffer, user->channel );
 }
 
 static void set_channel_mode( const char *channel, const char *level )
@@ -159,11 +182,22 @@ static void set_channel_mode( const char *channel, const char *level )
    send(IRC_SOCKET, buffer, strlen(buffer), 0);
 }
 
-static void set_mode( const char *channel, const char *nick,  const char *level )
+static void set_mode_nick( const char *nick, const char *channel, const char *level )
 {
    char buffer[ BUFFER_SIZE ];
 
    snprintf(buffer, BUFFER_SIZE,"MODE %s %s %s\r\n", channel, level, nick);
+#if DEBUG
+   printf("$ %s\n", buffer);
+#endif
+   send(IRC_SOCKET, buffer, strlen(buffer), 0);
+}
+
+static void set_mode( const user_info *user, const char *level )
+{
+   char buffer[ BUFFER_SIZE ];
+
+   snprintf(buffer, BUFFER_SIZE,"MODE %s %s %s\r\n", user->channel, level, user->nick);
 #if DEBUG
    printf("$ %s\n", buffer);
 #endif
@@ -213,7 +247,7 @@ static char *str_replace(const char *s, const char *old, const char *new)
   return cout;
 }
 
-static int strsplit(char ***dst, char *str, char *token) {
+static int strsplit(char ***dst, const char *str, const char *token) {
    char *saveptr, *ptr, *start;
    int32_t t_len, i;
 
@@ -291,6 +325,48 @@ static int ircconnect( const char *irc_server, int port, const char *nick )
    send(IRC_SOCKET, buffer, strlen(buffer), 0);
 }
 
+static size_t parseuserinfo( user_info *user, char *buffer, const char *CMD )
+{
+   size_t i, p;
+   uint8_t parse_channel = 0;
+
+   memset( user->nick, '\0', NICK_MAX * sizeof(char));
+   memset( user->ident, '\0', NICK_MAX * sizeof(char));
+   memset( user->channel, '\0', CHANNEL_MAX * sizeof(char));
+
+   /* read nick */
+   p = 0; i = 1;
+   for(; buffer[i] != '!'; ++i)
+   {
+      if( p > NICK_MAX ) return 0; /* non valid */
+      user->nick[p++] = buffer[i];
+   }
+
+   /* read ident */
+   p = 0; i++;
+   for(; buffer[i] != '@'; ++i)
+   {
+      if( p > NICK_MAX ) return 0; /* non valid */
+      user->ident[p++] = buffer[i];
+   }
+
+   /* read target */
+   p = 0;
+   for(; i != strlen(buffer); ++i)
+   {
+      if(p == CHANNEL_MAX) break; /* max reached */
+      if(!strncmp(&buffer[i], CMD, strlen(CMD))) { parse_channel = 1; i += strlen(CMD) + 1; }
+      if(parse_channel)
+      {  if(isspace(buffer[i])) break;
+         user->channel[p++] = buffer[i]; }
+   }
+   if(!parse_channel) return 0; /* non valid */
+   if(!strcmp(user->channel, BOT_NICK))
+      snprintf( user->channel, CHANNEL_MAX, "%s", user->nick ); /* PRIVATE MESSAGE */
+
+   return(i); /* return amount read */
+}
+
 static uint8_t CHANNEL_JOINED = 0;
 static void joinchannel( const char *channel )
 {
@@ -322,7 +398,7 @@ static void ping( char *buffer )
    joinchannel( BOT_CHANNEL );
 }
 
-static void privmsg( const char *nick, const char *message )
+static void privmsg( const user_info *user, const char *message )
 {
    size_t i;
 
@@ -330,7 +406,9 @@ static void privmsg( const char *nick, const char *message )
    for(; i != LENGTH(MSG_CMD); ++i)
    {
       if(!strncmp(message, MSG_CMD[i].command, strlen(MSG_CMD[i].command)))
-      { MSG_CMD[i].function( nick, message+strlen(MSG_CMD[i].command)+1 ); return; }
+      {  if(strlen(MSG_CMD[i].command)+1 > strlen(message)) MSG_CMD[i].function( user, "" );
+         else MSG_CMD[i].function( user, message+strlen(MSG_CMD[i].command)+1 );
+         return; }
    }
 }
 
@@ -338,21 +416,17 @@ static void parsemessage( char *buffer )
 {
    size_t i, p;
    uint8_t parse_message = 0;
-   char nick[ NICK_MAX + 1 ];
    char message[ MESSAGE_MAX + 1 ];
 
-   memset( nick, '\0', NICK_MAX * sizeof(char));
    memset( message, '\0', MESSAGE_MAX * sizeof(char));
 
-   i = 1;
-   for(; buffer[i] != '!'; ++i)
-   {
-      if( i-1 > NICK_MAX ) return; /* non valid */
-      nick[i-1] = buffer[i];
-   }
+   user_info user;
+   i = parseuserinfo( &user, buffer, HEADER_PRIVMSG );
+   if(!i) return;
 
+   /* read message */
    p = 0;
-   for(; i != BUFFER_SIZE; ++i)
+   for(; i != strlen(buffer); ++i)
    {
       if(p == MESSAGE_MAX) break; /* max reached */
       if(parse_message) message[p++] = buffer[i];
@@ -360,35 +434,36 @@ static void parsemessage( char *buffer )
    }
    if(!parse_message) return; /* non valid */
 
-   privmsg( nick, message );
+   privmsg( &user, message );
 }
 
-static void joinhandle( const char *nick, const char *channel )
+static void joinhandle( const user_info *user )
 {
    size_t i;
 
    i = 0;
    for(; i != LENGTH(MSG_CMD); ++i)
    {
-      if(!strcmp(nick, IRC_USR[i].nick))
+      if(!strcmp(user->nick, IRC_USR[i].nick))
       {
-         if(IRC_USR[i].joinfunc) IRC_USR[i].joinfunc( nick, channel );
-         if(IRC_USR[i].priv) set_mode( channel, nick, IRC_USR[i].priv );
+         usleep( 500 * 1000 );
+         if(IRC_USR[i].joinfunc) IRC_USR[i].joinfunc( user );
+         if(IRC_USR[i].priv) set_mode( user, IRC_USR[i].priv );
          return;
       }
    }
 }
 
-static void parthandle( const char *nick, const char *channel )
+static void parthandle( const user_info *user )
 {
    size_t i;
 
    i = 0;
    for(; i != LENGTH(MSG_CMD); ++i)
    {
-      if(!strcmp(nick, IRC_USR[i].nick))
+      if(!strcmp(user->nick, IRC_USR[i].nick))
       {
-         if(IRC_USR[i].partfunc) IRC_USR[i].partfunc( nick, channel );
+         if(IRC_USR[i].partfunc) IRC_USR[i].partfunc( user );
          return;
       }
    }
@@ -396,50 +471,29 @@ static void parthandle( const char *nick, const char *channel )
 
 static void parsejoinpart( char *buffer, uint8_t part )
 {
-   size_t i, p;
-   uint8_t parse_channel = 0;
-   char nick[ NICK_MAX + 1 ];
-   char channel[ CHANNEL_MAX + 1 ];
-
-   memset( nick, '\0', NICK_MAX * sizeof(char));
-   memset( channel, '\0', CHANNEL_MAX * sizeof(char));
-
-   i = 1;
-   for(; buffer[i] != '!'; ++i)
-   {
-      if( i-1 > NICK_MAX ) return; /* non valid */
-      nick[i-1] = buffer[i];
-   }
-
-   p = 0;
-   for(; i != BUFFER_SIZE; ++i)
-   {
-      if(p == CHANNEL_MAX) break; /* max reached */
-      if(buffer[i] == '#') parse_channel = 1;
-      if(parse_channel)
-      {  if(isspace(buffer[i])) break;
-         channel[p++] = buffer[i]; }
-   }
-   if(!parse_channel) return; /* non valid */
+   user_info user;
 
    if(!part) {
-      if(!strcmp(nick, BOT_NICK))
+      if(!parseuserinfo( &user, buffer, HEADER_JOIN )) return;
+      if(!strcmp(user.nick, BOT_NICK))
       {
          CHANNEL_JOINED = 1;
-         printf("-!- Joined %s\n", channel);
+         printf("-!- Joined %s\n", user.channel);
          return;
       }
-      joinhandle( nick, channel );
-      JOIN( nick, channel );
+      joinhandle( &user );
+      JOIN( &user );
    }
    else {
-      if(!strcmp(nick, BOT_NICK))
+      if(!parseuserinfo( &user, buffer, HEADER_PART )) return;
+      if(!strcmp(user.nick, BOT_NICK))
       {
          CHANNEL_JOINED = 0;
-         printf("-!- Parted %s\n", channel);
+         printf("-!- Parted %s\n", user.channel);
          return;
       }
-      PART( nick, channel );
+      parthandle( &user );
+      PART( &user );
    }
 }
 
@@ -452,19 +506,19 @@ static void parsebuffer( char *buffer )
    {
       if(i != 0 && buffer[i] == ':') return;
       /* PRIVMSG */
-      if(!strncmp(&buffer[i], HEADER_PRIVMSG, HEADER_PRIVMSG_SIZE))
+      if(!strncmp(&buffer[i], HEADER_PRIVMSG, strlen(HEADER_PRIVMSG)))
          parsemessage( buffer );
       /* JOIN */
-      if(!strncmp(&buffer[i], HEADER_JOIN, HEADER_JOIN_SIZE))
+      if(!strncmp(&buffer[i], HEADER_JOIN, strlen(HEADER_JOIN)))
          parsejoinpart( buffer, 0 );
       /* PART */
-      if(!strncmp(&buffer[i], HEADER_PART, HEADER_PART_SIZE))
+      if(!strncmp(&buffer[i], HEADER_PART, strlen(HEADER_PART)))
          parsejoinpart( buffer, 1 );
        /* PART */
-      if(!strncmp(&buffer[i], HEADER_KICK, HEADER_KICK_SIZE))
+      if(!strncmp(&buffer[i], HEADER_KICK, strlen(HEADER_KICK)))
          parsejoinpart( buffer, 1 );
       /* PING */
-      if(!strncmp(&buffer[i], HEADER_PING, HEADER_PING_SIZE))
+      if(!strncmp(&buffer[i], HEADER_PING, strlen(HEADER_PING)))
          ping( &buffer[i] );
       /* MODE SET FOR <NICK> */
       if(!strncmp(&buffer[i], MODE_NAME, strlen(MODE_NAME)))
