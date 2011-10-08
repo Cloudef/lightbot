@@ -25,7 +25,7 @@
 #define HEADER_NAMES          "NAMES"
 
 #define NICK_MAX 50
-#define IDENT_MAX 256
+#define IDENT_MAX 50
 #define CHANNEL_MAX 50
 #define MESSAGE_MAX 2048
 
@@ -91,11 +91,13 @@ static char *str_replace(const char *s, const char *old, const char *new);
 
 /* helper functions */
 static user_info* getusr( const char *nick, const char *channel );
+static int hasban( const user_info *user );
 static int isop( const user_info *user );
 static void say( const char *message, const char *target );
 static void say_highlight( const char *message, const user_info *user );
 static void set_mode( const user_info *user, const char *level );
 static void set_mode_channel( const char *channel, const char *level );
+static void set_topic( const char *channel, const char *topic );
 static void kick( const user_info *user, const char *reason );
 static void ban( const user_info *user, const char *reason );
 static void unban( const user_info *user );
@@ -109,12 +111,14 @@ static void cmd_unban( const user_info *user, const char *message );
 static void cmd_op( const user_info *user, const char *message );
 static void cmd_deop( const user_info *user, const char *message );
 static void cmd_help( const user_info *user, const char *message );
+static void cmd_topic( const user_info *user, const char *message );
 
 /* define cmds */
 static const command_t MSG_CMD[] =
 {
    /* COMMAND, FUNCTION, DESCRIPTION */
    { "!help", cmd_help,    "Help" },
+   { "!topic", cmd_topic,  "Topic" },
    { "!test", cmd_test,    "Test" },
    { "!kick", cmd_kick,    "Kick" },
    { "!unban", cmd_unban,  "Unban" },
@@ -160,6 +164,7 @@ static void cmd_unban( const user_info *user, const char *message )
    for(; i != count; ++i)
       unban( getusr(split[i], user->channel) );
    strsplit_clear(&split);
+   if(!count) { unban( getusr(message, user->channel) ); return; }
 }
 
 static void cmd_ban( const user_info *user, const char *message )
@@ -231,6 +236,7 @@ static void cmd_op( const user_info *user, const char *message )
    for(; i != count; ++i)
       set_mode( getusr(split[i], user->channel), "+o" );
    strsplit_clear(&split);
+   if(!count) { set_mode( getusr(message, user->channel), "+o" ); return; }
 }
 
 static void cmd_deop( const user_info *user, const char *message )
@@ -248,8 +254,14 @@ static void cmd_deop( const user_info *user, const char *message )
    for(; i != count; ++i)
       set_mode( getusr(split[i], user->channel), "-o" );
    strsplit_clear(&split);
-}
+   if(!count) { set_mode( getusr(message, user->channel), "-o" ); return; }}
+static void cmd_topic( const user_info *user, const char *message )
+{
+   if(!isop(user))
+      return;
 
+   set_topic( user->channel, message );
+}
 
 static void cmd_test( const user_info *user, const char *message )
 {
@@ -259,7 +271,7 @@ static void cmd_test( const user_info *user, const char *message )
 /* JOIN SIGNAL */
 static void JOIN( const user_info *user )
 {
-   say_highlight( "Welcome!", user );
+   if(!hasban(user)) say_highlight( "Welcome!", user );
 }
 
 /* PART SIGNAL */
@@ -304,7 +316,7 @@ static void say( const char *message, const char *target )
 #if DEBUG
    printf("$ %s\n", buffer);
 #endif
-   send(IRC_SOCKET, buffer, strlen(buffer), 0);
+   send(IRC_SOCKET, buffer, strlen(buffer) * sizeof(char), 0);
 
    if(++SAY_COUNT==5)
    { SAY_COUNT = 0; usleep( 500 * 1000 ); /* lol flood avoid, should be replaced with queue */ }
@@ -330,7 +342,7 @@ static void kick( const user_info *user, const char *reason )
 #if DEBUG
    printf("$ %s\n", buffer);
 #endif
-   send(IRC_SOCKET, buffer, strlen(buffer), 0);
+   send(IRC_SOCKET, buffer, strlen(buffer) * sizeof(char), 0);
 }
 
 static void set_channel_mode( const char *channel, const char *level )
@@ -341,7 +353,7 @@ static void set_channel_mode( const char *channel, const char *level )
 #if DEBUG
    printf("$ %s\n", buffer);
 #endif
-   send(IRC_SOCKET, buffer, strlen(buffer), 0);
+   send(IRC_SOCKET, buffer, strlen(buffer) * sizeof(char), 0);
 }
 
 static void set_mode( const user_info *user, const char *level )
@@ -353,7 +365,21 @@ static void set_mode( const user_info *user, const char *level )
 #if DEBUG
    printf("$ %s\n", buffer);
 #endif
-   send(IRC_SOCKET, buffer, strlen(buffer), 0);
+   send(IRC_SOCKET, buffer, strlen(buffer) * sizeof(char), 0);
+}
+
+static void set_topic( const char *channel, const char *topic )
+{
+   char buffer[ BUFFER_SIZE ];
+
+   if(!topic) return;
+   if(!strlen(topic)) return;
+
+   snprintf(buffer, BUFFER_SIZE,"TOPIC %s :%s\r\n", channel, topic);
+#if DEBUG
+   printf("$ %s\n", buffer);
+#endif
+   send(IRC_SOCKET, buffer, strlen(buffer) * sizeof(char), 0);
 }
 
 static size_t sh_run( const char *cmd, char output[][SH_READ_MAX], size_t lines )
@@ -417,6 +443,7 @@ static int hasban( const user_info *user )
 
 static void unban( const user_info *user )
 {
+   char message[ BUFFER_SIZE ];
    ban_t *c = IRC_BAN;
 
    if(!user) return;
@@ -424,7 +451,11 @@ static void unban( const user_info *user )
    for(; c; c = c->next)
       if( !strcmp(c->user->nick,  user->nick)  ||
           !strcmp(c->user->ident, user->ident) )
-      { delban(c); return; }
+      {
+         delban(c);
+         snprintf( message, BUFFER_SIZE, "* Unbanned %s", user->nick);
+         say( message, user->channel ); return;
+      }
 }
 
 static void ban( const user_info *user, const char *reason )
@@ -657,7 +688,7 @@ static int ircconnect( const char *irc_server, int port, const char *nick )
             "NICK %s\r\nUSER %s \"\" \"%s\" :x\r\n", nick, nick,
             (inet_ntoa(*((struct in_addr *) he->h_addr)))
             );
-   send(IRC_SOCKET, buffer, strlen(buffer), 0);
+   send(IRC_SOCKET, buffer, strlen(buffer) * sizeof(char), 0);
 }
 
 static size_t parseuserinfo( user_info *user, char *buffer, const char *CMD )
@@ -679,9 +710,10 @@ static size_t parseuserinfo( user_info *user, char *buffer, const char *CMD )
 
    /* read ident */
    p = 0; i++;
-   for(; !isspace(buffer[i]); ++i)
+   for(; buffer[i] != '@' && !isspace(buffer[i]); ++i)
    {
       if( p > IDENT_MAX ) return 0; /* non valid */
+      if(buffer[i] == '~') continue;
       user->ident[p++] = buffer[i];
    }
 
@@ -711,7 +743,7 @@ static void joinchannel( const char *channel )
       return;
 
    snprintf(buffer, BUFFER_SIZE, "JOIN %s\r\n", channel);
-   send(IRC_SOCKET, buffer, strlen(buffer), 0);
+   send(IRC_SOCKET, buffer, strlen(buffer) * sizeof(char), 0);
 }
 
 static void ping( char *buffer )
@@ -730,7 +762,7 @@ static void ping( char *buffer )
    puts(message); /* Answer */
 #endif
 
-   send(IRC_SOCKET, message, strlen(message), 0 );
+   send(IRC_SOCKET, message, strlen(message) * sizeof(char), 0 );
    joinchannel( BOT_CHANNEL );
 }
 
@@ -893,6 +925,7 @@ int main(int argc, char *argv[])
    {
       memset(buffer, '\0', BUFFER_SIZE);
       recv(IRC_SOCKET, buffer, BUFFER_SIZE * sizeof(char), 0);
+      send(IRC_SOCKET, "\r\n", strlen("\r\n") * sizeof(char), 0); /* flush */
       count = strsplit(&split,buffer,"\r\n");
 
       i = 0;
@@ -905,8 +938,6 @@ int main(int argc, char *argv[])
       }
       strsplit_clear(&split);
       if(!strlen(buffer)) break; /* something is wrong */
-
-      sleep(1);
    }
 
    puts("-! Closing");
