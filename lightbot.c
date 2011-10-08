@@ -22,8 +22,10 @@
 #define HEADER_JOIN           "JOIN"
 #define HEADER_PART           "PART"
 #define HEADER_KICK           "KICK"
+#define HEADER_NAMES          "NAMES"
 
 #define NICK_MAX 50
+#define IDENT_MAX 256
 #define CHANNEL_MAX 50
 #define MESSAGE_MAX 2048
 
@@ -43,7 +45,7 @@ typedef enum
 typedef struct
 {
    char nick[ NICK_MAX ];
-   char ident[ NICK_MAX ];
+   char ident[ IDENT_MAX ];
    char channel[ CHANNEL_MAX ];
 } user_info;
 
@@ -61,9 +63,24 @@ typedef struct
    const char *nick;
    const char *ident;
    const char *priv;
-   join_func   *joinfunc;
-   join_func   *partfunc;
+   join_func  *joinfunc;
+   join_func  *partfunc;
 } user_t;
+
+typedef struct ban_t
+{
+   user_info    *user;
+   char         *reason;
+   struct ban_t *next;
+} ban_t;
+static ban_t *IRC_BAN = NULL;
+
+typedef struct usr_t
+{
+   user_info    *user;
+   struct usr_t *next;
+} usr_t;
+static usr_t *IRC_USR = NULL;
 
 /* split funcs */
 static int strsplit(char ***dst, const char *str, const char *token);
@@ -73,32 +90,44 @@ static void strsplit_clear(char ***dst);
 static char *str_replace(const char *s, const char *old, const char *new);
 
 /* helper functions */
+static user_info* getusr( const char *nick, const char *channel );
+static int isop( const user_info *user );
 static void say( const char *message, const char *target );
 static void say_highlight( const char *message, const user_info *user );
 static void set_mode( const user_info *user, const char *level );
 static void set_mode_channel( const char *channel, const char *level );
-static void set_mode_nick( const char *nick, const char *channel, const char *level );
+static void kick( const user_info *user, const char *reason );
+static void ban( const user_info *user, const char *reason );
+static void unban( const user_info *user );
 static size_t sh_run( const char *cmd, char output[][SH_READ_MAX], size_t lines );
 
 /* cmds */
 static void cmd_test( const user_info *user, const char *message );
+static void cmd_kick( const user_info *user, const char *message );
+static void cmd_ban( const user_info *user, const char *message );
+static void cmd_unban( const user_info *user, const char *message );
 static void cmd_op( const user_info *user, const char *message );
+static void cmd_deop( const user_info *user, const char *message );
 static void cmd_help( const user_info *user, const char *message );
 
 /* define cmds */
 static const command_t MSG_CMD[] =
 {
    /* COMMAND, FUNCTION, DESCRIPTION */
-   { "!help", cmd_help,    "Show help" },
-   { "!test", cmd_test,    "Test command" },
-   { "!op",   cmd_op,      "Give ops" },
+   { "!help", cmd_help,    "Help" },
+   { "!test", cmd_test,    "Test" },
+   { "!kick", cmd_kick,    "Kick" },
+   { "!unban", cmd_unban,  "Unban" },
+   { "!ban",  cmd_ban,     "Ban" },
+   { "!deop", cmd_deop,    "Deop" },
+   { "!op", cmd_op,        "Op" },
 };
 
 /* define users */
-static const user_t IRC_USR[] =
+static const user_t IRC_PRIV[] =
 {
-   /* NICK, PRIVILIDGES, JOIN FUNCTION, PART FUNCTION */
-   { "Admin", "+o",      NULL, NULL },
+   /* NICK, IDENT, PRIVILIDGES, JOIN FUNCTION, PART FUNCTION */
+   { "Admin", NULL, "+o", NULL, NULL },
 };
 
 static void cmd_help( const user_info *user, const char *message )
@@ -115,17 +144,109 @@ static void cmd_help( const user_info *user, const char *message )
    }
 }
 
+
+static void cmd_unban( const user_info *user, const char *message )
+{
+   char **split = NULL;
+   int count = 0, i;
+
+   if(!isop(user))
+      return;
+
+   if(!strlen(message)) return;
+
+   count = strsplit(&split,message," ");
+   i = 0;
+   for(; i != count; ++i)
+      unban( getusr(split[i], user->channel) );
+   strsplit_clear(&split);
+}
+
+static void cmd_ban( const user_info *user, const char *message )
+{
+   char nick[ NICK_MAX ];
+   char reason[ strlen(message) ];
+   int i, p;
+
+   if(!isop(user))
+      return;
+
+   if(!strlen(message)) return;
+
+   memset( nick, '\0', NICK_MAX * sizeof(char));
+   memset( reason, '\0', strlen(message) * sizeof(char));
+
+   /* nick */
+   p = 0; i = 0;
+   for(; i != strlen(message) && !isspace(message[i]); ++i)
+      nick[p++] = message[i];
+
+   /* reason */
+   p = 0; i++;
+   for(; i < strlen(message); ++i)
+      reason[p++] = message[i];
+
+   ban( getusr(nick, user->channel), reason );
+}
+
+static void cmd_kick( const user_info *user, const char *message )
+{
+   char nick[ NICK_MAX ];
+   char reason[ strlen(message) ];
+   int i, p;
+
+   if(!isop(user))
+      return;
+
+   if(!strlen(message)) return;
+
+   memset( nick, '\0', NICK_MAX * sizeof(char));
+   memset( reason, '\0', strlen(message) * sizeof(char));
+
+   /* nick */
+   p = 0; i = 0;
+   for(; i != strlen(message) && !isspace(message[i]); ++i)
+      nick[p++] = message[i];
+
+   /* reason */
+   p = 0; i++;
+   for(; i < strlen(message); ++i)
+      reason[p++] = message[i];
+
+   kick( getusr(nick, user->channel), reason );
+}
+
 static void cmd_op( const user_info *user, const char *message )
 {
    char **split = NULL;
    int count = 0, i;
+
+   if(!isop(user))
+      return;
 
    if(!strlen(message)) { set_mode( user, "+o" ); return; }
 
    count = strsplit(&split,message," ");
    i = 0;
    for(; i != count; ++i)
-      set_mode_nick( split[i], user->channel, "+o" );
+      set_mode( getusr(split[i], user->channel), "+o" );
+   strsplit_clear(&split);
+}
+
+static void cmd_deop( const user_info *user, const char *message )
+{
+   char **split = NULL;
+   int count = 0, i;
+
+   if(!isop(user))
+      return;
+
+   if(!strlen(message)) { set_mode( user, "-o" ); return; }
+
+   count = strsplit(&split,message," ");
+   i = 0;
+   for(; i != count; ++i)
+      set_mode( getusr(split[i], user->channel), "-o" );
    strsplit_clear(&split);
 }
 
@@ -148,6 +269,32 @@ static void PART( const user_info *user )
 }
 
 /* HELPER FUNCTIONS */
+static int isop( const user_info *user )
+{
+   size_t i;
+
+   i = 0;
+   for(; i != LENGTH(IRC_PRIV); ++i)
+   {
+      if(IRC_PRIV[i].ident)
+      {
+         if(!strcmp(user->nick, IRC_PRIV[i].nick) &&
+            !strcmp(user->ident, IRC_PRIV[i].ident))
+         {
+            if(strstr(IRC_PRIV[i].priv, "o")) return 1;
+         }
+      } else
+      {
+         if(!strcmp(user->nick, IRC_PRIV[i].nick))
+         {
+            if(strstr(IRC_PRIV[i].priv, "o")) return 1;
+         }
+      }
+   }
+
+   return 0;
+}
+
 static uint8_t SAY_COUNT = 0;
 static void say( const char *message, const char *target )
 {
@@ -166,9 +313,24 @@ static void say( const char *message, const char *target )
 static void say_highlight( const char *message, const user_info *user )
 {
    char buffer[ MESSAGE_MAX ];
+   if(!user) return;
 
    snprintf( buffer, MESSAGE_MAX, "%s: %s", user->nick, message );
    say( buffer, user->channel );
+}
+
+static void kick( const user_info *user, const char *reason )
+{
+   char buffer[ BUFFER_SIZE ];
+   if(!user) return;
+
+   if(reason && strlen(reason))
+        snprintf(buffer, BUFFER_SIZE,"KICK %s %s :%s\r\n", user->channel, user->nick, reason);
+   else snprintf(buffer, BUFFER_SIZE,"KICK %s %s\r\n", user->channel, user->nick);
+#if DEBUG
+   printf("$ %s\n", buffer);
+#endif
+   send(IRC_SOCKET, buffer, strlen(buffer), 0);
 }
 
 static void set_channel_mode( const char *channel, const char *level )
@@ -182,20 +344,10 @@ static void set_channel_mode( const char *channel, const char *level )
    send(IRC_SOCKET, buffer, strlen(buffer), 0);
 }
 
-static void set_mode_nick( const char *nick, const char *channel, const char *level )
-{
-   char buffer[ BUFFER_SIZE ];
-
-   snprintf(buffer, BUFFER_SIZE,"MODE %s %s %s\r\n", channel, level, nick);
-#if DEBUG
-   printf("$ %s\n", buffer);
-#endif
-   send(IRC_SOCKET, buffer, strlen(buffer), 0);
-}
-
 static void set_mode( const user_info *user, const char *level )
 {
    char buffer[ BUFFER_SIZE ];
+   if(!user) return;
 
    snprintf(buffer, BUFFER_SIZE,"MODE %s %s %s\r\n", user->channel, level, user->nick);
 #if DEBUG
@@ -222,6 +374,189 @@ static size_t sh_run( const char *cmd, char output[][SH_READ_MAX], size_t lines 
 
    pclose(pipe);
    return( i );
+}
+
+static void clearbans(void)
+{
+   ban_t *c = IRC_BAN, *next = NULL;
+
+   for(; c; c = next)
+   { next = c->next; free(c); }
+   IRC_BAN = NULL;
+}
+
+static void delban(ban_t *b )
+{
+   ban_t *c = IRC_BAN, **cc = &IRC_BAN;
+
+   if(!b) return;
+
+   for(; c && c->next && c->next != b; c = c->next)
+      cc = &c;
+   (*cc)->next = b->next;
+
+#if DEBUG
+   printf( "$ DELBAN %s!%s %s\n", b->user->nick, b->user->ident, b->user->channel );
+#endif
+
+   if(b == IRC_BAN) IRC_BAN = NULL;
+   free(b->user);
+   free(b);
+}
+
+static int hasban( const user_info *user )
+{
+   ban_t *c = IRC_BAN;
+
+   for(; c; c = c->next)
+      if( !strcmp(c->user->nick,  user->nick)  ||
+          !strcmp(c->user->ident, user->ident) )
+         return 1;
+   return 0;
+}
+
+static void unban( const user_info *user )
+{
+   ban_t *c = IRC_BAN;
+
+   if(!user) return;
+
+   for(; c; c = c->next)
+      if( !strcmp(c->user->nick,  user->nick)  ||
+          !strcmp(c->user->ident, user->ident) )
+      { delban(c); return; }
+}
+
+static void ban( const user_info *user, const char *reason )
+{
+   ban_t *c;
+
+   if(!user) return;
+   if(hasban(user)) return;
+
+   if(!IRC_BAN) { IRC_BAN = malloc( sizeof(ban_t) ); c = IRC_BAN; }
+   else {
+      c = IRC_BAN; for(; c && c->next; c = c->next);
+      c->next = malloc( sizeof(ban_t) ); c = c->next;
+   }
+   if(!c) return;
+
+   c->user = malloc( sizeof(user_info) );
+   if(!c->user)   { delban(c); return; }
+   memcpy( c->user, user, sizeof(user_info) );
+   c->reason = strdup(reason);
+   if(!c->reason) { delban(c); return; }
+   c->next = NULL;
+
+#if DEBUG
+   printf( "$ BANUSR %s!%s %s\n", user->nick, user->ident, user->channel );
+#endif
+
+   /* finally kick */
+   kick( c->user, c->reason );
+}
+
+static void clearusrs(void)
+{
+   usr_t *c = IRC_USR, *next = NULL;
+
+   for(; c; c = next)
+   { next = c->next; free(c); }
+   IRC_USR = NULL;
+}
+
+static user_info* getusr( const char *nick, const char *channel )
+{
+   usr_t *c = IRC_USR;
+   ban_t *b = IRC_BAN;
+
+   for(; c; c = c->next)
+      if( !strcmp(c->user->nick,    nick)  &&
+          !strcmp(c->user->channel, channel))
+         return c->user;
+
+   /* might be banned too */
+   for(; b; b = b->next)
+      if( !strcmp(b->user->nick,    nick)  &&
+          !strcmp(b->user->channel, channel))
+         return b->user;
+
+   return NULL;
+}
+
+static int hasusr( const user_info *user )
+{
+   usr_t *c = IRC_USR;
+
+   for(; c; c = c->next)
+      if( !strcmp(c->user->nick,  user->nick)  &&
+          !strcmp(c->user->ident, user->ident) &&
+          !strcmp(c->user->channel, user->channel))
+         return 1;
+   return 0;
+}
+
+static void delusr(usr_t *b)
+{
+   usr_t *c = IRC_USR, **cc = &IRC_USR;
+
+   if(!b) return;
+
+   for(; c && c->next && c->next != b; c = c->next)
+      cc = &c;
+   (*cc)->next = b->next;
+
+#if DEBUG
+   printf( "$ DELUSR %s!%s %s\n", b->user->nick, b->user->ident, b->user->channel );
+#endif
+
+   if(b == IRC_USR) IRC_USR = NULL;
+   free(b->user);
+   free(b);
+}
+
+static void unusr_channel( const char *channel )
+{
+   usr_t *c = IRC_USR;
+
+   for(; c; c = c->next)
+      if( !strcmp(c->user->channel, channel))
+      { delusr(c); }
+}
+
+static void unusr( const user_info *user )
+{
+   usr_t *c = IRC_USR;
+
+   for(; c; c = c->next)
+      if( !strcmp(c->user->nick,  user->nick)  &&
+          !strcmp(c->user->ident, user->ident) &&
+          !strcmp(c->user->channel, user->channel))
+      { delusr(c); return; }
+}
+
+static void addusr( const user_info *user )
+{
+   usr_t *c;
+
+   if(hasban(user)) kick( user, "You are banned" );
+   if(hasusr(user)) return;
+
+   if(!IRC_USR) { IRC_USR = malloc( sizeof(usr_t) ); c = IRC_USR; }
+   else {
+      c = IRC_USR; for(; c && c->next; c = c->next);
+      c->next = malloc( sizeof(usr_t) ); c = c->next;
+   }
+   if(!c) return;
+
+   c->user = malloc( sizeof(user_info) );
+   if(!c->user)   { delusr(c); return; }
+   memcpy( c->user, user, sizeof(user_info) );
+   c->next = NULL;
+
+#if DEBUG
+   printf( "$ ADDUSR %s!%s %s\n", user->nick, user->ident, user->channel );
+#endif
 }
 
 /* BOT CODE BELOW */
@@ -331,7 +666,7 @@ static size_t parseuserinfo( user_info *user, char *buffer, const char *CMD )
    uint8_t parse_channel = 0;
 
    memset( user->nick, '\0', NICK_MAX * sizeof(char));
-   memset( user->ident, '\0', NICK_MAX * sizeof(char));
+   memset( user->ident, '\0', IDENT_MAX * sizeof(char));
    memset( user->channel, '\0', CHANNEL_MAX * sizeof(char));
 
    /* read nick */
@@ -344,9 +679,9 @@ static size_t parseuserinfo( user_info *user, char *buffer, const char *CMD )
 
    /* read ident */
    p = 0; i++;
-   for(; buffer[i] != '@'; ++i)
+   for(; !isspace(buffer[i]); ++i)
    {
-      if( p > NICK_MAX ) return 0; /* non valid */
+      if( p > IDENT_MAX ) return 0; /* non valid */
       user->ident[p++] = buffer[i];
    }
 
@@ -356,6 +691,7 @@ static size_t parseuserinfo( user_info *user, char *buffer, const char *CMD )
    {
       if(p == CHANNEL_MAX) break; /* max reached */
       if(!strncmp(&buffer[i], CMD, strlen(CMD))) { parse_channel = 1; i += strlen(CMD) + 1; }
+      if(buffer[i] == ':') continue;
       if(parse_channel)
       {  if(isspace(buffer[i])) break;
          user->channel[p++] = buffer[i]; }
@@ -434,6 +770,7 @@ static void parsemessage( char *buffer )
    }
    if(!parse_message) return; /* non valid */
 
+   addusr( &user ); /* if he's been AFK on channel, and bot joined later */
    privmsg( &user, message );
 }
 
@@ -442,13 +779,12 @@ static void joinhandle( const user_info *user )
    size_t i;
 
    i = 0;
-   for(; i != LENGTH(MSG_CMD); ++i)
+   for(; i != LENGTH(IRC_PRIV); ++i)
    {
-      if(!strcmp(user->nick, IRC_USR[i].nick))
+      if(!strcmp(user->nick, IRC_PRIV[i].nick))
       {
-         usleep( 500 * 1000 );
-         if(IRC_USR[i].joinfunc) IRC_USR[i].joinfunc( user );
-         if(IRC_USR[i].priv) set_mode( user, IRC_USR[i].priv );
+         if(IRC_PRIV[i].joinfunc) IRC_PRIV[i].joinfunc( user );
+         if(IRC_PRIV[i].priv) set_mode( user, IRC_PRIV[i].priv );
          return;
       }
    }
@@ -459,11 +795,11 @@ static void parthandle( const user_info *user )
    size_t i;
 
    i = 0;
-   for(; i != LENGTH(MSG_CMD); ++i)
+   for(; i != LENGTH(IRC_PRIV); ++i)
    {
-      if(!strcmp(user->nick, IRC_USR[i].nick))
+      if(!strcmp(user->nick, IRC_PRIV[i].nick))
       {
-         if(IRC_USR[i].partfunc) IRC_USR[i].partfunc( user );
+         if(IRC_PRIV[i].partfunc) IRC_PRIV[i].partfunc( user );
          return;
       }
    }
@@ -481,6 +817,7 @@ static void parsejoinpart( char *buffer, uint8_t part )
          printf("-!- Joined %s\n", user.channel);
          return;
       }
+      addusr( &user );
       joinhandle( &user );
       JOIN( &user );
    }
@@ -490,8 +827,10 @@ static void parsejoinpart( char *buffer, uint8_t part )
       {
          CHANNEL_JOINED = 0;
          printf("-!- Parted %s\n", user.channel);
+         unusr_channel( user.channel );
          return;
       }
+      unusr( &user );
       parthandle( &user );
       PART( &user );
    }
@@ -528,6 +867,8 @@ static void parsebuffer( char *buffer )
 
 static void cleanup( int ret )
 {
+   clearbans();
+   clearusrs();
    if(IRC_SOCKET) close(IRC_SOCKET);
    IRC_SOCKET = 0;
    exit(ret);
