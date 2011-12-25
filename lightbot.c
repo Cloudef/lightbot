@@ -15,7 +15,7 @@
 #define BOT_SERVER  "irc.freenode.net"
 #define BOT_CHANNEL "#test" /* only one channel supported right now */
 
-#define BUFFER_SIZE 4096
+#define BUFFER_SIZE  4096
 #define HEADER_PING           "PING :"
 #define HEADER_PONG           "PONG :"
 #define HEADER_PRIVMSG        "PRIVMSG"
@@ -24,10 +24,10 @@
 #define HEADER_KICK           "KICK"
 #define HEADER_NAMES          "NAMES"
 
-#define NICK_MAX 50
-#define IDENT_MAX 50
-#define CHANNEL_MAX 50
-#define MESSAGE_MAX 2048
+#define NICK_MAX     50
+#define IDENT_MAX    50
+#define CHANNEL_MAX  50
+#define MESSAGE_MAX  2048
 
 #define SH_READ_MAX 256
 
@@ -178,8 +178,8 @@ static void cmd_ban( const user_info *user, const char *message )
 
    if(!strlen(message)) return;
 
-   memset( nick, '\0', NICK_MAX * sizeof(char));
-   memset( reason, '\0', strlen(message) * sizeof(char));
+   memset( nick,     0, NICK_MAX * sizeof(char));
+   memset( reason,   0, strlen(message) * sizeof(char));
 
    /* nick */
    p = 0; i = 0;
@@ -205,8 +205,8 @@ static void cmd_kick( const user_info *user, const char *message )
 
    if(!strlen(message)) return;
 
-   memset( nick, '\0', NICK_MAX * sizeof(char));
-   memset( reason, '\0', strlen(message) * sizeof(char));
+   memset( nick,     0, NICK_MAX * sizeof(char));
+   memset( reason,   0, strlen(message) * sizeof(char));
 
    /* nick */
    p = 0; i = 0;
@@ -291,7 +291,7 @@ static int isop( const user_info *user )
       if(IRC_PRIV[i].ident)
       {
          if(!strcmp(user->nick, IRC_PRIV[i].nick) &&
-            !strcmp(user->ident, IRC_PRIV[i].ident))
+            !strstr(user->ident, IRC_PRIV[i].ident))
          {
             if(strstr(IRC_PRIV[i].priv, "o")) return 1;
          }
@@ -588,6 +588,13 @@ static void addusr( const user_info *user )
 #if DEBUG
    printf( "$ ADDUSR %s!%s %s\n", user->nick, user->ident, user->channel );
 #endif
+
+   /* check if user is OP */
+   if(!isop(user))
+      return;
+
+   /* OP him */
+   set_mode(user, "+o");
 }
 
 /* BOT CODE BELOW */
@@ -689,6 +696,8 @@ static int ircconnect( const char *irc_server, int port, const char *nick )
             (inet_ntoa(*((struct in_addr *) he->h_addr)))
             );
    send(IRC_SOCKET, buffer, strlen(buffer) * sizeof(char), 0);
+
+   return( RETURN_OK );
 }
 
 static size_t parseuserinfo( user_info *user, char *buffer, const char *CMD )
@@ -696,9 +705,9 @@ static size_t parseuserinfo( user_info *user, char *buffer, const char *CMD )
    size_t i, p;
    uint8_t parse_channel = 0;
 
-   memset( user->nick, '\0', NICK_MAX * sizeof(char));
-   memset( user->ident, '\0', IDENT_MAX * sizeof(char));
-   memset( user->channel, '\0', CHANNEL_MAX * sizeof(char));
+   memset( user->nick,     0, NICK_MAX    * sizeof(char));
+   memset( user->ident,    0, IDENT_MAX   * sizeof(char));
+   memset( user->channel,  0, CHANNEL_MAX * sizeof(char));
 
    /* read nick */
    p = 0; i = 1;
@@ -710,7 +719,7 @@ static size_t parseuserinfo( user_info *user, char *buffer, const char *CMD )
 
    /* read ident */
    p = 0; i++;
-   for(; buffer[i] != '@' && !isspace(buffer[i]); ++i)
+   for(; !isspace(buffer[i]); ++i)
    {
       if( p > IDENT_MAX ) return 0; /* non valid */
       if(buffer[i] == '~') continue;
@@ -875,25 +884,24 @@ static void parsebuffer( char *buffer )
    i = 0;
    for(; buffer[i] != '\0'; ++i)
    {
-      if(i != 0 && buffer[i] == ':') return;
       /* PRIVMSG */
-      if(!strncmp(&buffer[i], HEADER_PRIVMSG, strlen(HEADER_PRIVMSG)))
-         parsemessage( buffer );
+      if(!strncmp(buffer + i, HEADER_PRIVMSG, strlen(HEADER_PRIVMSG)))
+      { parsemessage( buffer ); break; }
       /* JOIN */
-      if(!strncmp(&buffer[i], HEADER_JOIN, strlen(HEADER_JOIN)))
-         parsejoinpart( buffer, 0 );
+      else if(!strncmp(buffer + i, HEADER_JOIN, strlen(HEADER_JOIN)))
+      { parsejoinpart( buffer, 0 ); break; }
       /* PART */
-      if(!strncmp(&buffer[i], HEADER_PART, strlen(HEADER_PART)))
-         parsejoinpart( buffer, 1 );
+      else if(!strncmp(buffer + i, HEADER_PART, strlen(HEADER_PART)))
+      { parsejoinpart( buffer, 1 ); break; }
        /* PART */
-      if(!strncmp(&buffer[i], HEADER_KICK, strlen(HEADER_KICK)))
-         parsejoinpart( buffer, 1 );
+      else if(!strncmp(buffer + i, HEADER_KICK, strlen(HEADER_KICK)))
+      { parsejoinpart( buffer, 1 ); break; }
       /* PING */
-      if(!strncmp(&buffer[i], HEADER_PING, strlen(HEADER_PING)))
-         ping( &buffer[i] );
+      else if(!strncmp(buffer + i, HEADER_PING, strlen(HEADER_PING)))
+      { ping( buffer + i ); break; }
       /* MODE SET FOR <NICK> */
-      if(!strncmp(&buffer[i], MODE_NAME, strlen(MODE_NAME)))
-         joinchannel( BOT_CHANNEL );
+      else if(!strncmp(buffer + i, MODE_NAME, strlen(MODE_NAME)))
+      { joinchannel( BOT_CHANNEL ); break; }
    }
 }
 
