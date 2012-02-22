@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <signal.h>
+#include <ctype.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -254,7 +255,9 @@ static void cmd_deop( const user_info *user, const char *message )
    for(; i != count; ++i)
       set_mode( getusr(split[i], user->channel), "-o" );
    strsplit_clear(&split);
-   if(!count) { set_mode( getusr(message, user->channel), "-o" ); return; }}
+   if(!count) { set_mode( getusr(message, user->channel), "-o" ); return; }
+}
+
 static void cmd_topic( const user_info *user, const char *message )
 {
    if(!isop(user))
